@@ -29,11 +29,11 @@ SHINYEMOJI = "✨" # Emoji to recognize shiny with
 # EMOJI
 MYTHICALEMOJI = "🌌" # Emoji to recognize mythical with
 # EMOJI
-SHINYBUFFS = [1000,1000] # Shiny Buffs
+SHINYBUFFS = [500,500] # Shiny Buffs
 # ATK, HP
-MYTHICALBUFFS = [2500,2500] # Mythical Buffs
+MYTHICALBUFFS = [1000,1000] # Mythical Buffs
 # ATK, HP
-MAXSTATS = [12000,12000] # Max stats a card is limited to (before buffs)
+MAXSTATS = [3000,1000] # Max stats a card is limited to (before buffs)
 # ATK, HP
 DAMAGERNG = [0,2000] # Damage a boss can deal IF attack_amount has NOT been inputted in /boss admin attack.
 # Min Damage, Max Damage
