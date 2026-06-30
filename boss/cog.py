@@ -33,7 +33,7 @@ SHINYBUFFS = [500,500] # Shiny Buffs
 # ATK, HP
 MYTHICALBUFFS = [1000,1000] # Mythical Buffs
 # ATK, HP
-MAXSTATS = [3000,1000] # Max stats a card is limited to (before buffs)
+MAXSTATS = [1000,3000] # Max stats a card is limited to (before buffs)
 # ATK, HP
 DAMAGERNG = [0,2000] # Damage a boss can deal IF attack_amount has NOT been inputted in /boss admin attack.
 # Min Damage, Max Damage
