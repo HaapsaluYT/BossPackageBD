@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import io
 import logging
 import random
@@ -14,7 +12,7 @@ from django.utils import timezone
 from bd_models.models import Ball, BallInstance, Player
 from bd_models.models import balls as balls_cache
 from bd_models.models import specials
-from ballsdex.core.utils.transformers import BallTransform, BallInstanceTransform, BallEnabledTransform
+from ballsdex.core.utils.transformers import BallTransform, BallInstanceTransform, BallEnabledTransform, SpecialEnabledTransform
 from ballsdex.core.utils import checks
 from ballsdex.settings import settings
 
@@ -22,21 +20,32 @@ if TYPE_CHECKING:
     from ballsdex.core.bot import BallsDexBot
 
 log = logging.getLogger("ballsdex.packages.boss")
-Interaction = discord.Interaction["BallsDexBot"]
 
 # Configuration constants
-SHINYEMOJI = "✨" # Emoji to recognize shiny with
-# EMOJI
-MYTHICALEMOJI = "🌌" # Emoji to recognize mythical with
-# EMOJI
-SHINYBUFFS = [500,500] # Shiny Buffs
-# ATK, HP
-MYTHICALBUFFS = [1000,1000] # Mythical Buffs
-# ATK, HP
+SPECIAL_BUFFS = {
+    "✨": (500,500), # Shiny Buffs
+} # Special buffs
+# Emoji: (ATK, HP)
 MAXSTATS = [1000,3000] # Max stats a card is limited to (before buffs)
 # ATK, HP
 DAMAGERNG = [0,2000] # Damage a boss can deal IF attack_amount has NOT been inputted in /boss admin attack.
 # Min Damage, Max Damage
+
+def ball_description(countryball, bot, *, include_emoji: bool = True) -> str:
+    if not hasattr(countryball, "description"):
+        return ""
+    return countryball.description(short=True, include_emoji=include_emoji, bot=bot)
+
+
+def get_special_buffs(countryball, bot) -> tuple[int, int]:
+    if not getattr(countryball, "special_id", None):
+        return 0, 0
+
+    description = ball_description(countryball, bot)
+    return next(
+        (buffs for emoji, buffs in SPECIAL_BUFFS.items() if emoji in description),
+        (0, 0),
+    )
 
 class JoinButton(discord.ui.View):
     """Join button for boss battles"""
@@ -210,10 +219,10 @@ class BossBattleReward(models.Model):
 class Boss(commands.GroupCog, name="boss"):
     """Boss battle system — fight powerful bosses with your collection!"""
     
-    def __init__(self, bot: BallsDexBot):
+    def __init__(self, bot: "BallsDexBot"):
         self.bot = bot
         
-        # Boss battle state (from original BossPackageBD)
+        # Boss battle state
         self.boss_enabled = False
         self.bossball = None
         self.bossHP = 0
@@ -232,8 +241,6 @@ class Boss(commands.GroupCog, name="boss"):
         self.lasthitter = 0  # Track last person to hit boss
         self.currentvalue = ""  # Track round actions
         self.pending_selections: dict[int, BallInstance] = {}
-        
-        log.info("Boss Cog initialized")
         
     admin = app_commands.Group(name="admin", description="Boss administration commands")
 
@@ -257,19 +264,19 @@ class Boss(commands.GroupCog, name="boss"):
     async def start(
         self,
         interaction: discord.Interaction["BallsDexBot"],
-        ball: BallEnabledTransform,
+        countryball: BallEnabledTransform,
         hp_amount: int,
         start_image: discord.Attachment | None = None,
         defend_image: discord.Attachment | None = None,
         attack_image: discord.Attachment | None = None,
     ):
         """
-        Start a boss battle with the specified ball
+        Start a boss battle with the specified countryball
         
         Parameters
         ----------
-        ball: Ball
-            The ball to use as boss
+        countryball: Ball
+            The countryball to use as boss
         hp_amount: int
             HP amount for the boss
         start_image: discord.Attachment | None
@@ -285,11 +292,8 @@ class Boss(commands.GroupCog, name="boss"):
             await interaction.followup.send("A boss battle is already active!", ephemeral=True)
             return
         
-        # Ball is already provided by BallTransform
-        
         try:
-            # Follow original BossPackageBD pattern - only set HP and store ball
-            self.bossball = ball
+            self.bossball = countryball
             self.bossHP = hp_amount
             self.bossmaxhp = hp_amount
             self.bossattack_image = attack_image
@@ -298,17 +302,17 @@ class Boss(commands.GroupCog, name="boss"):
             self.users = []
             self.usersinround = []
             self.balls = []  # Reset selected balls
-            self.round = 0  # Start at 0 like original
+            self.round = 0  # Round count starts when the first phase begins
             self.picking = False  # Don't start picking immediately
             self.attack = True
             self.pending_selections = {}
             
-            await interaction.followup.send(f"Boss battle started with {ball.country}!", ephemeral=True)
+            await interaction.followup.send(f"Boss battle started with {countryball.country}!", ephemeral=True)
             
             # Prepare boss image file
             if start_image is None:
-                extension = ball.collection_card.name.split(".")[-1]
-                file_location = str(ball.collection_card.path)
+                extension = countryball.collection_card.name.split(".")[-1]
+                file_location = str(countryball.collection_card.path)
                 file = discord.File(file_location, filename=f"boss.{extension}")
             else:
                 file = await start_image.to_file()
@@ -316,7 +320,7 @@ class Boss(commands.GroupCog, name="boss"):
             # Send announcement message with join button and boss image
             view = JoinButton(self)
             message = await interaction.channel.send(
-                f"# The boss battle has begun! {self.bot.get_emoji(ball.emoji_id)}\n"
+                f"# The boss battle has begun! {self.bot.get_emoji(countryball.emoji_id)}\n"
                 f"-# HP: {self.bossHP}",
                 file=file,
                 view=view
@@ -329,68 +333,76 @@ class Boss(commands.GroupCog, name="boss"):
 
     
     @app_commands.command()
-    async def select(self, interaction: Interaction, ball: BallInstanceTransform):
+    async def select(
+        self,
+        interaction: discord.Interaction["BallsDexBot"],
+        countryball: BallInstanceTransform,
+        special: SpecialEnabledTransform | None = None,
+    ):
         """
         Select countryball to use against the boss
         
         Parameters
         ----------
-        ball: Ball
-            The ball to use for this round
+        countryball: BallInstance
+            The countryball you want to select
+        special: Special
+            Filter the results of autocompletion to a special event. Ignored afterwards.
         """
         await interaction.response.defer(ephemeral=True, thinking=True)
         
         if [interaction.user.id, self.round] in self.usersinround:
             return await interaction.followup.send(
-                f"You have already selected a ball", ephemeral=True
+                f"You have already selected a {settings.collectible_name}", ephemeral=True
             )
         
         if not self.boss_enabled:
             return await interaction.followup.send("Boss is disabled", ephemeral=True)
         
         if not self.picking:
-            return await interaction.followup.send(f"It is not yet time to select a ball", ephemeral=True)
+            return await interaction.followup.send(
+                f"It is not yet time to select a {settings.collectible_name}", ephemeral=True
+            )
         
         if interaction.user.id not in self.users:
             return await interaction.followup.send(
                 "You did not join, or you're dead/disqualified.", ephemeral=True
             )
         
-        if not ball.tradeable:
+        if not countryball.tradeable:
             await interaction.followup.send(
-                f"You cannot use this ball.", ephemeral=True
+                f"You cannot use this {settings.collectible_name}.", ephemeral=True
             )
             return
         
-        if ball in self.balls:
+        if countryball in self.balls:
             return await interaction.followup.send(
-                f"You cannot select the same ball twice", ephemeral=True
+                f"You cannot select the same {settings.collectible_name} twice", ephemeral=True
             )
         
         # Store the selection for processing in end_round
-        self.pending_selections[interaction.user.id] = ball
+        self.pending_selections[interaction.user.id] = countryball
         
         # Add to selected balls and track round participation
-        self.balls.append(ball)
+        self.balls.append(countryball)
         self.usersinround.append([interaction.user.id, self.round])
         
-        # Calculate stats with capping (like original)
-        ball_attack = min(max(ball.attack, 0), MAXSTATS[0])
-        ball_health = min(max(ball.health, 0), MAXSTATS[1])
+        # Calculate stats with capping
+        ball_attack = min(max(countryball.attack, 0), MAXSTATS[0])
+        ball_health = min(max(countryball.health, 0), MAXSTATS[1])
         
-        # Apply shiny buffs if applicable
-        messageforuser = f"{ball.description(short=True, include_emoji=True, bot=self.bot)} has been selected for this round, with {ball_attack} ATK and {ball_health} HP"
-        if ball.special_id and MYTHICALEMOJI in messageforuser:
-            messageforuser = f"{ball.description(short=True, include_emoji=True, bot=self.bot)} has been selected for this round, with {ball_attack}+{MYTHICALBUFFS[0]} ATK and {ball_health}+{MYTHICALBUFFS[1]} HP"
-        elif ball.special_id and SHINYEMOJI in messageforuser:
-            messageforuser = f"{ball.description(short=True, include_emoji=True, bot=self.bot)} has been selected for this round, with {ball_attack}+{SHINYBUFFS[0]} ATK and {ball_health}+{SHINYBUFFS[1]} HP"
+        special_attack_buff, special_health_buff = get_special_buffs(countryball, self.bot)
+        total_attack = ball_attack + special_attack_buff
+        total_health = ball_health + special_health_buff
+        ball_display = ball_description(countryball, self.bot)
+        messageforuser = f"{ball_display} has been selected for this round, with {total_attack} ATK and {total_health} HP"
         
         await interaction.followup.send(messageforuser, ephemeral=True)
         await self._log_action(f"-# Round {self.round}\n{interaction.user}'s {messageforuser}\n-# -------")
 
     
     @app_commands.command()
-    async def ongoing(self, interaction: Interaction):
+    async def ongoing(self, interaction: discord.Interaction["BallsDexBot"]):
         """
         Show your damage to the boss in the current fight
         """
@@ -451,7 +463,7 @@ class Boss(commands.GroupCog, name="boss"):
         self.picking = False
         self.boss_enabled = False
         
-        # Calculate total damage per player (following inspirational code pattern)
+        # Calculate total damage per player
         test = self.usersdamage
         test2 = []
         total = ""
@@ -545,28 +557,24 @@ class Boss(commands.GroupCog, name="boss"):
             ball_attack = min(max(ball.attack, 0), MAXSTATS[0])
             ball_health = min(max(ball.health, 0), MAXSTATS[1])
             
-            # Re-check shiny buffs for logic
-            ball_desc = ball.description(short=True, include_emoji=True, bot=self.bot)
-            if ball.special_id and MYTHICALEMOJI in ball_desc:
-                ball_health += MYTHICALBUFFS[1]
-                ball_attack += MYTHICALBUFFS[0]
-            elif ball.special_id and SHINYEMOJI in ball_desc:
-                ball_health += SHINYBUFFS[1]
-                ball_attack += SHINYBUFFS[0]
+            ball_desc = ball_description(ball, self.bot)
+            special_attack_buff, special_health_buff = get_special_buffs(ball, self.bot)
+            ball_health += special_health_buff
+            ball_attack += special_attack_buff
             
             if not self.attack:  # Boss is defending, players attack
                 self.bossHP -= ball_attack
                 self.usersdamage.append([user_id, ball_attack, ball_desc])
-                self.currentvalue += f"{await self.bot.fetch_user(user_id)}'s {ball.description(short=True, bot=self.bot)} has dealt {ball_attack} damage!\n"
+                self.currentvalue += f"{await self.bot.fetch_user(user_id)}'s {ball_description(ball, self.bot, include_emoji=False)} has dealt {ball_attack} damage!\n"
                 self.lasthitter = user_id
             else:  # Boss is attacking, players defend
                 user_obj = await self.bot.fetch_user(user_id)
                 if self.bossattack >= ball_health:
                     if user_id in self.users:
                         self.users.remove(user_id)
-                    self.currentvalue += f"{user_obj}'s {ball.description(short=True, bot=self.bot)} had {ball_health}HP and died!\n"
+                    self.currentvalue += f"{user_obj}'s {ball_description(ball, self.bot, include_emoji=False)} had {ball_health} HP and died!\n"
                 else:
-                    self.currentvalue += f"{user_obj}'s {ball.description(short=True, bot=self.bot)} had {ball_health}HP and survived!\n"
+                    self.currentvalue += f"{user_obj}'s {ball_description(ball, self.bot, include_emoji=False)} had {ball_health} HP and survived!\n"
 
         # Clear pending selections for next round
         self.pending_selections = {}
@@ -654,7 +662,10 @@ class Boss(commands.GroupCog, name="boss"):
             f"Round {self.round}\n# {self.bossball.country} is preparing to attack! {self.bot.get_emoji(self.bossball.emoji_id)}",
             file=file
         )
-        await interaction.channel.send(f"> Use `/boss select` to select your defending ball.\n> Your selected ball's HP will be used to defend.")
+        await interaction.channel.send(
+            f"> Use `/boss select` to select your defending {settings.collectible_name}.\n"
+            f"> Your selected {settings.collectible_name}'s HP will be used to defend."
+        )
         
         self.picking = True
         self.attack = True
@@ -691,7 +702,10 @@ class Boss(commands.GroupCog, name="boss"):
             f"Round {self.round}\n# {self.bossball.country} is preparing to defend! {self.bot.get_emoji(self.bossball.emoji_id)}",
             file=file
         )
-        await interaction.channel.send(f"> Use `/boss select` to select your attacking ball.\n> Your selected ball's ATK will be used to attack.")
+        await interaction.channel.send(
+            f"> Use `/boss select` to select your attacking {settings.collectible_name}.\n"
+            f"> Your selected {settings.collectible_name}'s ATK will be used to attack."
+        )
         
         self.picking = True
         self.attack = False
@@ -892,7 +906,6 @@ Damage Records: {len(self.usersdamage)}"""
                 f"Special=Boss "
                 f"ATK=0 HP=0")
                 
-                # Send announcement message (like original)
                 if channel:
                     await channel.send(
                         f"# Boss has concluded {self.bot.get_emoji(self.bossball.emoji_id)}\n<@{bosswinner}> has won the Boss Battle!\n\n"
@@ -925,5 +938,5 @@ Damage Records: {len(self.usersdamage)}"""
         self.pending_selections = {}
 
     async def _log_action(self, message: str):
-        """Log boss actions to console and webhook (BallsDex V3 pattern)"""
+        """Log boss actions to console and webhook."""
         log.info(f"Boss: {message}", extra={"webhook": True})
