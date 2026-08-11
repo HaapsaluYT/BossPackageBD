@@ -16,6 +16,9 @@ from ballsdex.core.utils.transformers import BallTransform, BallInstanceTransfor
 from ballsdex.core.utils import checks
 from ballsdex.settings import settings
 
+from ability import abilitymod
+
+
 if TYPE_CHECKING:
     from ballsdex.core.bot import BallsDexBot
 
@@ -556,11 +559,20 @@ class Boss(commands.GroupCog, name="boss"):
             # Ball exists, process results
             ball_attack = min(max(ball.attack, 0), MAXSTATS[0])
             ball_health = min(max(ball.health, 0), MAXSTATS[1])
-            
+
             ball_desc = ball_description(ball, self.bot)
             special_attack_buff, special_health_buff = get_special_buffs(ball, self.bot)
             ball_health += special_health_buff
             ball_attack += special_attack_buff
+
+            # Compute modifiers based on both boss and attacker
+            mods = abilitymod(self.bossball, ball)
+
+            # Apply multiplicative and additive modifiers safely, while ensuring health logic is not disrupted
+            ball_attack = max(0, int(ball_attack * mods.get("atk_mult", 1.0) + mods.get("atk_add", 0)))
+            og_ball_health = ball_health
+            ball_health = max(0, int(ball_health * mods.get("hp_mult", 1.0) + mods.get("hp_add", 0)))
+
             
             if not self.attack:  # Boss is defending, players attack
                 self.bossHP -= ball_attack
@@ -572,9 +584,9 @@ class Boss(commands.GroupCog, name="boss"):
                 if self.bossattack >= ball_health:
                     if user_id in self.users:
                         self.users.remove(user_id)
-                    self.currentvalue += f"{user_obj}'s {ball_description(ball, self.bot, include_emoji=False)} had {ball_health} HP and died!\n"
+                    self.currentvalue += f"{user_obj}'s {ball_description(ball, self.bot, include_emoji=False)} had {og_ball_health} HP and died!\n"
                 else:
-                    self.currentvalue += f"{user_obj}'s {ball_description(ball, self.bot, include_emoji=False)} had {ball_health} HP and survived!\n"
+                    self.currentvalue += f"{user_obj}'s {ball_description(ball, self.bot, include_emoji=False)} had {og_ball_health} HP and survived!\n"
 
         # Clear pending selections for next round
         self.pending_selections = {}
